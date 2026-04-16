@@ -36,6 +36,26 @@ def test_high_severity_issue_drives_score_down():
     assert risk["level"] in ("medium", "high")
 
 
+def test_identical_fix_does_not_autofix():
+    """
+    When the heuristic fixer has no handler for an issue type (e.g. Maintainability/TODO),
+    it returns the original code unchanged. The risk assessor must not recommend
+    auto-applying a fix that is byte-for-byte identical to the original — that would
+    be unsafe confidence (the system acts certain while changing nothing).
+
+    This test would FAIL before the guardrail (score=80, level=low → should_autofix=True)
+    and PASS after it (identical-fix check overrides should_autofix to False).
+    """
+    code = "# TODO: validate inputs before calling API\n# TODO: add error handling\n"
+    risk = assess_risk(
+        original_code=code,
+        fixed_code=code,  # heuristic fixer produced no change — identical to original
+        issues=[{"type": "Maintainability", "severity": "Medium", "msg": "TODO comment"}],
+    )
+    assert risk["should_autofix"] is False
+    assert any("identical" in r.lower() for r in risk["reasons"])
+
+
 def test_missing_return_is_penalized():
     original = "def f(x):\n    return x + 1\n"
     fixed = "def f(x):\n    x + 1\n"

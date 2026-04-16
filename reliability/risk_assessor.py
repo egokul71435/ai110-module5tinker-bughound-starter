@@ -1,3 +1,4 @@
+import re
 from typing import Dict, List
 
 
@@ -63,6 +64,16 @@ def assess_risk(
         reasons.append("Bare except was modified, verify correctness.")
 
     # ----------------------------
+    # New import signal
+    # ----------------------------
+    original_imports = set(re.findall(r"^\s*(?:import|from)\s+(\S+)", original_code, re.MULTILINE))
+    fixed_imports = set(re.findall(r"^\s*(?:import|from)\s+(\S+)", fixed_code, re.MULTILINE))
+    new_imports = fixed_imports - original_imports
+    if new_imports:
+        score -= 15
+        reasons.append(f"Fix introduces new import(s): {', '.join(sorted(new_imports))}.")
+
+    # ----------------------------
     # Clamp score
     # ----------------------------
     score = max(0, min(100, score))
@@ -81,6 +92,10 @@ def assess_risk(
     # Auto-fix policy
     # ----------------------------
     should_autofix = level == "low"
+
+    if fixed_code.strip() == original_code.strip():
+        should_autofix = False
+        reasons.append("Fix is identical to original code; nothing would be changed by auto-applying.")
 
     if not reasons:
         reasons.append("No significant risks detected.")
