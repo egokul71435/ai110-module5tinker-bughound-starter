@@ -84,11 +84,27 @@ The original guard only caught `None` (unparseable JSON). An empty list parses f
 
 **Guardrail added:** `analyze()` now uses `if not issues:` instead of `if issues is None:`, so both a parse failure and an empty-list response trigger the heuristic fallback.
 
+**Failure 3 — Gemini mode never actually called the model (wrong message role)**
+
+Input: any snippet, Gemini mode enabled, valid API key configured.
+What happened: `GeminiClient.complete()` sent the system prompt as a `{"role": "system", ...}` entry in the content list. The `google-generativeai` SDK rejects this — only `USER`/`MODEL` roles are valid — and raises `400 InvalidArgument: Role 'system' is not supported`. That exception was caught by `complete()`'s own `except Exception` and converted to `""`, which is indistinguishable downstream from a genuinely empty model response. Every trace looked identical to a rate-limit or content-filter failure ("LLM returned empty or unparseable output" / "LLM returned empty output"), so Gemini mode silently ran as heuristic mode 100% of the time, with a valid key, regardless of quota.
+
+This is the same "unsafe confidence" shape as Failure 1: the system reported a plausible-looking failure reason (implying transient API trouble) when the real cause was a structural bug in the request that would fail on every single call, forever, key or no key.
+
+**Guardrail added:** system prompts are now passed via `GenerativeModel(model_name, system_instruction=system_prompt)` instead of a `role: system` message. Verified against a live key: Gemini now returns real, non-fallback issue lists and rewritten code (e.g. correctly flagging the unclosed file handle and bare `except:` in `flaky_try_except.py` with distinct High-severity issues, and proposing a `with open(...)` rewrite) rather than falling back to heuristics.
+
+**Failure 4 — Real API errors were indistinguishable from normal empty responses**
+
+Input: any snippet, Gemini mode enabled, a request that genuinely fails (tested by pointing `GeminiClient` at a nonexistent model name, which surfaces `404 models/not-a-real-model is not found ...` from the real API).
+What happened: `GeminiClient.complete()` wrapped its entire body in a bare `except Exception: return ""`. This was meant to protect the agent from rate limits and transient errors, but it also caught genuine, actionable errors and converted them into the same empty string a filtered or malformed-but-successful response would produce. `BugHoundAgent.analyze()`/`propose_fix()` each have their own try/except around `client.complete()` specifically to catch API errors and log a distinct `"API Error: {message}"` trace entry (which in turn drives `bughound_app.py`'s "⚠️ API Request Failed" warning banner) — but that code path was unreachable, because `GeminiClient` never let an exception through. Every real failure showed up in the UI as the generic "LLM returned empty output" message, with no banner and no indication of what actually went wrong (bad key vs. rate limit vs. bad model name vs. network drop all looked identical).
+
+**Guardrail added:** `GeminiClient.complete()` no longer catches exceptions itself; it only defensively handles `response.text` being `None` (a legitimately empty-but-successful response, e.g. from safety filtering). Real API errors now propagate to `BugHoundAgent`, which logs the actual error message and correctly triggers the "API Request Failed" banner. Verified: a forced 404 now produces `ANALYZE: API Error: 404 models/not-a-real-model is not found ...` in the trace instead of a silent empty-output fallback, while a valid call still returns real Gemini output as before.
+
 ---
 
 ## 6) Heuristic vs. Gemini comparison
 
-All runs in this session used offline/heuristic mode, either directly (`client=None`) or via `MockClient`, which intentionally returns non-JSON for analyzer prompts to force fallback. The following comparison is therefore based on observed heuristic behavior plus the behavior Gemini mode is designed to produce based on the prompts and parsing code.
+Most runs in this session used offline/heuristic mode, either directly (`client=None`) or via `MockClient`, which intentionally returns non-JSON for analyzer prompts to force fallback. After fixing the system-role bug (Failure 3 above), one live Gemini run was verified against `flaky_try_except.py`: it returned three distinct issues (unclosed file handle, bare `except:`, unbounded `.read()`) with substantive explanations, and rewrote the fix using `with open(...)` and `except (FileNotFoundError, OSError)`. The risk assessor scored that fix 0/high (three severity deductions plus the bare-except-modified penalty) and correctly withheld auto-fix — a stricter outcome than the heuristic fixer's simpler regex substitution would produce on the same input, since Gemini's fix touches more of the function. The comparison below combines that observation with the behavior heuristic mode is designed to produce.
 
 | Dimension | Heuristic mode | Gemini mode |
 |---|---|---|
